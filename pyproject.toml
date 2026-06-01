@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "iidca"
+version = "0.1.0"
+description = "Intelligent Investor Quantitative DCA Dashboard"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.3,<3",
+    "pandas>=2.2,<3",
+    "numpy>=1.26,<3",
+    "pandas-ta-classic>=0.3.14b",
+    "fredapi>=0.5.2",
+    "requests>=2.31",
+    "yfinance>=0.2.55",
+    "duckdb>=1.1",
+    "pyarrow>=16",
+    "streamlit>=1.36",
+    "python-telegram-bot>=21.0",
+    "rich>=13",
+    "click>=8.1",
+    "apscheduler>=3.10",
+]
+
+[project.optional-dependencies]
+webhook = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
+]
+tiingo = [
+    "tiingo>=0.15",
+]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "hypothesis>=6.100",
+    "pytest-mock>=3.14",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+iidca = "iidca.run:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/iidca"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "network: marks tests as requiring network access (deselect with '-m not network')",
+]

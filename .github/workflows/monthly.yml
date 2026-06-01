@@ -1,0 +1,54 @@
+name: Monthly DCA Cycle
+
+on:
+  schedule:
+    # First of every month at 08:00 UTC
+    - cron: "0 8 1 * *"
+  workflow_dispatch:
+    inputs:
+      alert:
+        description: "Send Telegram/email alert"
+        required: false
+        default: "true"
+        type: boolean
+
+jobs:
+  dca-cycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run DCA cycle
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
+        run: |
+          ALERT_FLAG=""
+          if [ "${{ github.event.inputs.alert }}" != "false" ]; then
+            ALERT_FLAG="--alert"
+          fi
+          uv run python -m iidca.run $ALERT_FLAG --verbose
+
+      - name: Upload DuckDB snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dca-snapshot-${{ github.run_id }}
+          path: ~/.cache/iidca/snapshots.duckdb
+          retention-days: 90

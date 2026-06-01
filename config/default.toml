@@ -1,0 +1,55 @@
+# Intelligent Investor DCA Dashboard — default configuration
+# All thresholds, weights, and bounds live here. Changing risk appetite = editing this file.
+# See config_hash in snapshots (§9.4) — every past recommendation is attributable to an exact
+# parameter set stored here.
+
+target_symbol = "QQQ"
+market_provider = "yfinance"   # yfinance | stooq | tiingo | tradingview
+
+[macro]
+# Sub-score ramp boundaries (see §5.1)
+sahm_trigger      = 0.50   # ≥ triggers SAHM_RECESSION circuit breaker
+curve_inv_floor   = -0.5   # worst inversion → sub-score 0
+curve_healthy_ref = 1.0    # healthy spread → sub-score 1
+stress_calm_lo    = -1.0   # calm → sub-score 1
+stress_hi         = 1.0    # stressed → sub-score 0
+stress_crisis     = 1.5    # ≥ triggers FIN_STRESS_CRISIS circuit breaker
+
+# Macro Health Score weights (must sum to 1.0)
+w_sahm   = 0.40
+w_curve  = 0.25
+w_stress = 0.35
+
+# H thresholds for regime classification
+regime_expansion = 0.66
+regime_caution   = 0.40
+
+# FRED series IDs. STLFSI4 is current (STLFSI3 discontinued 2022-10-28).
+[macro.series]
+sahm    = "SAHMREALTIME"
+t10y2y  = "T10Y2Y"
+stlfsi  = "STLFSI4"
+nfci    = "NFCI"
+
+[tactical]
+z_window            = 200   # rolling Z-score window (trading days)
+sma_window          = 200   # SMA window
+sma_slope_lookback  = 20    # days back for SMA slope sign
+adx_period          = 14
+rsi_period          = 14
+atr_period          = 14
+atr_baseline_window = 252   # long-run ATR% median window
+adx_trend_thresh    = 25.0  # ADX above this = strong trend
+g_vol_min           = 0.40  # floor for vol_factor (never damp aggression below 40%)
+staleness_days      = 5     # max age of last market bar before data_ok=False
+
+[fusion]
+alpha        = 0.75   # max tilt amplitude (pre-gate range [1-α, 1+α] = [0.25, 1.75])
+beta         = 1.5    # tanh saturation scale (std devs)
+lam          = 1.0    # defensive amplifier when macro weak (factor ∈ [1, 1+lam])
+g_trend_down = 0.30   # guard multiplier when trend_strong_down=True
+m_cap_exp    = 2.00   # regime cap: EXPANSION
+m_cap_caution = 1.25  # regime cap: CAUTION
+m_cap_stress  = 1.00  # regime cap: STRESS (never lever into a collapsing tape)
+m_min         = 0.25  # global floor — never fully stop DCA
+m_max         = 2.00  # global ceiling

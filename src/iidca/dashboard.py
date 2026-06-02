@@ -65,6 +65,8 @@ def _color_for(regime: str) -> str:
 def _is_stale(snap: dict | None, hours: int) -> bool:
     if snap is None:
         return True
+    if not snap.get("data_ok", True):
+        return True  # previous run had errors — always retry
     run_ts = snap.get("run_ts")
     if run_ts is None:
         return True
@@ -111,11 +113,12 @@ if not st.session_state.auto_refreshed:
     _snap_check = get_latest_snapshot()
     if _is_stale(_snap_check, cfg.refresh_hours):
         st.session_state.auto_refreshed = True
-        with st.spinner(f"Refreshing data (last update over {cfg.refresh_hours}h ago)…"):
+        with st.spinner(f"Refreshing data…"):
             try:
                 from iidca.run import run_cycle  # noqa: PLC0415
                 run_cycle(cfg)
             except Exception as exc:
+                st.session_state.auto_refreshed = False  # allow retry after fix
                 st.warning(f"Auto-refresh failed: {exc}")
         st.rerun()
 

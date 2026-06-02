@@ -33,12 +33,21 @@ st.set_page_config(
 )
 
 # Inject Streamlit Cloud secrets into the environment so providers find them
-for _secret in ("FRED_API_KEY",):
-    try:
-        if _secret in st.secrets and _secret not in os.environ:
-            os.environ[_secret] = str(st.secrets[_secret])
-    except Exception:
-        pass
+_fred_key_ok = bool(os.environ.get("FRED_API_KEY"))
+try:
+    if "FRED_API_KEY" in st.secrets:
+        os.environ["FRED_API_KEY"] = str(st.secrets["FRED_API_KEY"])
+        _fred_key_ok = True
+except Exception:
+    pass
+
+if not _fred_key_ok:
+    st.error(
+        "**FRED_API_KEY not configured.** "
+        "Go to your Streamlit Cloud app → Settings → Secrets and add:\n\n"
+        "```toml\nFRED_API_KEY = \"your_key_here\"\n```\n\n"
+        "Get a free key at https://fredaccount.stlouisfed.org/apikeys"
+    )
 
 # ---------------------------------------------------------------------------
 # Helpers

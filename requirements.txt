@@ -3,6 +3,7 @@ pydantic-settings>=2.3,<3
 pandas>=2.2,<3
 numpy>=1.26,<3
 pandas-ta-classic>=0.3.14b
+pandas-datareader>=0.10
 fredapi>=0.5.2
 requests>=2.31
 yfinance>=0.2.55

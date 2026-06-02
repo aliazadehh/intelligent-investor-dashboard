@@ -73,15 +73,27 @@ def run_cycle(cfg: AppCfg) -> Decision:
         df = provider.ohlcv(cfg.target_symbol)
         tech_state = score_tactical(df, cfg.tactical, cfg.target_symbol)
     except Exception as exc:
-        logger.error("Market data failure: %s", exc)
-        from iidca.models import TechnicalState as TS  # noqa: PLC0415
-        tech_state = TS(
-            symbol=cfg.target_symbol,
-            price=0.0, sma200=0.0, sma_slope=0.0,
-            z=0.0, atr_pct=0.0, vol_factor=1.0,
-            adx=0.0, rsi=50.0, trend_strong_down=False,
-            data_ok=False,
-        )
+        logger.warning("%s provider failed: %s — trying stooq fallback", cfg.market_provider, exc)
+        _stooq_ok = False
+        if cfg.market_provider != "stooq":
+            try:
+                from iidca.providers.stooq_provider import StooqProvider  # noqa: PLC0415
+                df = StooqProvider().ohlcv(cfg.target_symbol)
+                tech_state = score_tactical(df, cfg.tactical, cfg.target_symbol)
+                _stooq_ok = True
+                logger.info("stooq fallback succeeded")
+            except Exception as exc2:
+                logger.error("stooq fallback also failed: %s", exc2)
+        if not _stooq_ok:
+            logger.error("All market data providers failed")
+            from iidca.models import TechnicalState as TS  # noqa: PLC0415
+            tech_state = TS(
+                symbol=cfg.target_symbol,
+                price=0.0, sma200=0.0, sma_slope=0.0,
+                z=0.0, atr_pct=0.0, vol_factor=1.0,
+                adx=0.0, rsi=50.0, trend_strong_down=False,
+                data_ok=False,
+            )
 
     # ── 3. Fuse ───────────────────────────────────────────────────────────────
     decision = decide(macro_state, tech_state, cfg.fusion)

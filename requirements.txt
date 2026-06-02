@@ -1,0 +1,15 @@
+pydantic>=2.7,<3
+pydantic-settings>=2.3,<3
+pandas>=2.2,<3
+numpy>=1.26,<3
+pandas-ta-classic>=0.3.14b
+fredapi>=0.5.2
+requests>=2.31
+yfinance>=0.2.55
+duckdb>=1.1
+pyarrow>=16
+streamlit>=1.36
+python-telegram-bot>=21.0
+rich>=13
+click>=8.1
+apscheduler>=3.10

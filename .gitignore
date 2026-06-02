@@ -47,3 +47,4 @@ htmlcov/
 # Data / secrets
 *.db
 *.sqlite
+.streamlit/secrets.toml

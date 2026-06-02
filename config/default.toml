@@ -5,6 +5,7 @@
 
 target_symbol = "QQQ"
 market_provider = "yfinance"   # yfinance | stooq | tiingo | tradingview
+refresh_hours  = 24            # dashboard auto-refresh cadence (hours); 24=daily, 168=weekly
 
 [macro]
 # Sub-score ramp boundaries (see §5.1)

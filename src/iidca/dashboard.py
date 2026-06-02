@@ -11,6 +11,15 @@ persisted snapshot.  A "Run fresh cycle" button triggers run_cycle().
 from __future__ import annotations
 
 import json
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+# Make 'iidca' importable when running directly (e.g. on Streamlit Cloud)
+_src = Path(__file__).parent.parent
+if str(_src) not in sys.path:
+    sys.path.insert(0, str(_src))
 
 import streamlit as st
 
@@ -22,6 +31,14 @@ st.set_page_config(
     page_icon="📊",
     layout="wide",
 )
+
+# Inject Streamlit Cloud secrets into the environment so providers find them
+for _secret in ("FRED_API_KEY",):
+    try:
+        if _secret in st.secrets and _secret not in os.environ:
+            os.environ[_secret] = str(st.secrets[_secret])
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -36,6 +53,21 @@ def _color_for(regime: str) -> str:
     return _COLOR.get(m.get(regime, "amber"), "#f39c12")
 
 
+def _is_stale(snap: dict | None, hours: int) -> bool:
+    if snap is None:
+        return True
+    run_ts = snap.get("run_ts")
+    if run_ts is None:
+        return True
+    if hasattr(run_ts, "to_pydatetime"):
+        run_ts = run_ts.to_pydatetime()
+    if isinstance(run_ts, str):
+        run_ts = datetime.fromisoformat(run_ts)
+    if run_ts.tzinfo is None:
+        run_ts = run_ts.replace(tzinfo=timezone.utc)
+    return datetime.now(tz=timezone.utc) - run_ts > timedelta(hours=hours)
+
+
 # ---------------------------------------------------------------------------
 # Sidebar: config + run
 # ---------------------------------------------------------------------------
@@ -48,6 +80,7 @@ if st.sidebar.button("🔄 Run fresh cycle", use_container_width=True):
         try:
             from iidca.run import run_cycle  # noqa: PLC0415
             run_cycle(cfg)
+            st.session_state.auto_refreshed = True
             st.sidebar.success("Cycle complete.")
             st.rerun()
         except Exception as exc:
@@ -56,6 +89,26 @@ if st.sidebar.button("🔄 Run fresh cycle", use_container_width=True):
 st.sidebar.markdown("---")
 st.sidebar.caption(f"Symbol: **{cfg.target_symbol}**")
 st.sidebar.caption(f"Provider: `{cfg.market_provider}`")
+st.sidebar.caption(f"Auto-refresh every: **{cfg.refresh_hours}h**")
+
+# ---------------------------------------------------------------------------
+# Auto-refresh: run cycle when data is stale
+# ---------------------------------------------------------------------------
+
+if "auto_refreshed" not in st.session_state:
+    st.session_state.auto_refreshed = False
+
+if not st.session_state.auto_refreshed:
+    _snap_check = get_latest_snapshot()
+    if _is_stale(_snap_check, cfg.refresh_hours):
+        st.session_state.auto_refreshed = True
+        with st.spinner(f"Refreshing data (last update over {cfg.refresh_hours}h ago)…"):
+            try:
+                from iidca.run import run_cycle  # noqa: PLC0415
+                run_cycle(cfg)
+            except Exception as exc:
+                st.warning(f"Auto-refresh failed: {exc}")
+        st.rerun()
 
 # ---------------------------------------------------------------------------
 # Load latest snapshot
@@ -81,7 +134,6 @@ as_of = snap.get("as_of", "—")
 breakers = json.loads(snap.get("breakers", "[]")) if snap.get("breakers") else []
 
 # Rebuild zone1 status string
-_liq_raw = snap.get("stlfsi", None)  # may not be stored; fallback
 status_str = f"{regime.replace('EXPANSION','Expansion').replace('CAUTION','Late-Cycle Caution').replace('STRESS','Contraction / Systemic Stress')}"
 if breakers:
     status_str += "  ⚠ " + ", ".join(breakers)

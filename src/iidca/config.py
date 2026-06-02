@@ -71,6 +71,7 @@ class FusionCfg(BaseModel):
 class AppCfg(BaseModel):
     target_symbol: str = "QQQ"
     market_provider: str = "yfinance"  # yfinance | stooq | tiingo | tradingview
+    refresh_hours: int = 24  # auto-refresh interval for the dashboard
     macro: MacroCfg = Field(default_factory=MacroCfg)
     tactical: TacticalCfg = Field(default_factory=TacticalCfg)
     fusion: FusionCfg = Field(default_factory=FusionCfg)

@@ -1,25 +1,38 @@
 """
-Tactical Engine — Zone 2 / Column B.
+Tactical Engine — per-asset statistics.
 
-Pure function over an OHLCV DataFrame → TechnicalState.
+Pure functions over an OHLCV DataFrame → TechnicalState (+ chart series).
 Testable with fixture data; no I/O, no side effects.
 
-Metrics computed (§6.1–6.2):
-  • 200-day SMA on adjusted close + slope (sign of SMA[t] − SMA[t−k], k=20)
-  • Rolling Z-score on LOG price: Z = (ln P − μ_W) / σ_W, window W=200
-      Negative Z = price below rolling mean = cheap
-  • ATR% = ATR(14) / Close  — current volatility as a fraction of price
-  • vol_factor = clamp(atr_pct_baseline / atr_pct_now, g_vol_min, 1.0)
-      atr_pct_baseline = long rolling median of ATR% (default window=252 days)
-      High current vol → vol_factor < 1 → damps aggression (§6.3)
-  • ADX(14) + DMI  — trend strength, orthogonal to Z
-  • RSI(14)        — momentum / oversold timing
+Valuation measure (see DECISIONS.md #1):
+  Z is the *trend-residual Z-score*: fit an OLS trendline to log price over
+  the trailing z_window days, then standardize today's deviation from that
+  line by the residual std-dev:
 
-Derived guard (§6.3):
-  • trend_strong_down = Close < SMA200 AND SMA200_slope < 0 AND ADX > adx_trend_thresh
+      ln P_k ≈ a + b·k          (k = 0 … W−1, OLS fit)
+      Z = (ln P_today − fit_today) / σ_resid
+
+  Why not the old rolling-mean Z?  For an asset growing at a constant rate,
+  (ln P − rolling mean) / rolling std converges to a CONSTANT ≈ +1.73
+  regardless of the growth rate — a steadily trending asset reads as
+  "permanently expensive" and the system structurally under-invests in it.
+  The residual Z is mean-zero on a pure trend by construction: it measures
+  displacement from the asset's own recent path, which is the quantity a
+  DCA tilt should respond to. All outputs are dimensionless / log-scale, so
+  the same parameters generalize across equities, ETFs and crypto.
+
+Other metrics:
+  • SMA(sma_window) + slope (sign over sma_slope_lookback days)
+  • ATR% = ATR(atr_period) / Close — volatility as a fraction of price
+  • vol_factor = clamp(atr_pct_baseline / atr_pct_now, g_vol_min, 1.0)
+      atr_pct_baseline = rolling median of ATR% (atr_baseline_window days)
+  • ADX(adx_period) — trend strength, direction-agnostic
+  • trend_strong_down = Close < SMA AND slope < 0 AND ADX > adx_trend_thresh
+
+RSI was removed from the pipeline (DECISIONS.md #5): it never entered the
+decision math, and a 14-day oscillator is noise at a monthly decision cadence.
 
 Note on library: uses pandas_ta_classic (maintained community fork of pandas_ta).
-  import pandas_ta_classic as ta   # NOT pandas_ta (inactive/archived ~July 2026)
 """
 
 from __future__ import annotations
@@ -36,11 +49,120 @@ from iidca.models import TechnicalState
 
 logger = logging.getLogger(__name__)
 
+TRADING_DAYS_PER_YEAR = 252
+
 
 def _clamp(x: float, lo: float, hi: float) -> float:
     """Clamp x to [lo, hi]."""
     return max(lo, min(hi, x))
 
+
+# --------------------------------------------------------------------------- #
+#  Trend-residual Z — vectorized rolling OLS on log price                      #
+# --------------------------------------------------------------------------- #
+
+def trend_residual_stats(logp: np.ndarray, window: int) -> pd.DataFrame:
+    """Rolling OLS of log price on time over *window* bars.
+
+    Returns a DataFrame with one row per input bar (first window−1 rows NaN):
+      z            — (logp − fitted endpoint) / residual std
+      slope_daily  — fitted log-price slope per bar
+      sigma_resid  — residual std-dev (log units), ddof=2
+      fit_end      — fitted log price at the window's last bar
+    """
+    n = len(logp)
+    out = pd.DataFrame(
+        np.nan,
+        index=range(n),
+        columns=["z", "slope_daily", "sigma_resid", "fit_end"],
+    )
+    if n < window or window < 3:
+        return out
+
+    w = window
+    k = np.arange(w, dtype=float)
+    kbar = (w - 1) / 2.0
+    sxx = w * (w * w - 1) / 12.0  # Σ(k − kbar)²
+
+    windows = np.lib.stride_tricks.sliding_window_view(logp, w)  # (n−w+1, w)
+    ybar = windows.mean(axis=1)
+    slope = windows @ (k - kbar) / sxx
+    fit_end = ybar + slope * (w - 1 - kbar)
+
+    # residual SS = total SS − explained SS; guard tiny negatives from fp error
+    ss_tot = ((windows - ybar[:, None]) ** 2).sum(axis=1)
+    ss_res = np.maximum(ss_tot - slope**2 * sxx, 0.0)
+    sigma = np.sqrt(ss_res / (w - 2))
+
+    last = windows[:, -1]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z = np.where(sigma > 0, (last - fit_end) / sigma, 0.0)
+
+    idx = np.arange(w - 1, n)
+    out.loc[idx, "z"] = z
+    out.loc[idx, "slope_daily"] = slope
+    out.loc[idx, "sigma_resid"] = sigma
+    out.loc[idx, "fit_end"] = fit_end
+    return out
+
+
+def current_trend_channel(df: pd.DataFrame, cfg: TacticalCfg) -> pd.DataFrame:
+    """Trendline + σ-bands over the *current* z_window, for charting.
+
+    Returns a DataFrame indexed like the last z_window bars of *df* with
+    columns: close, fit, lo1, hi1, lo2, hi2 (price units — bands are the
+    fitted log-price line ± 1σ/2σ of residuals, exponentiated).
+    """
+    w = cfg.z_window
+    tail = df.iloc[-w:]
+    logp = np.log(tail["Close"].to_numpy(dtype=float))
+    k = np.arange(w, dtype=float)
+    kbar = (w - 1) / 2.0
+    sxx = w * (w * w - 1) / 12.0
+    ybar = logp.mean()
+    slope = float((logp * (k - kbar)).sum() / sxx)
+    fit = ybar + slope * (k - kbar)
+    ss_res = max(((logp - fit) ** 2).sum(), 0.0)
+    sigma = float(np.sqrt(ss_res / (w - 2)))
+
+    return pd.DataFrame(
+        {
+            "close": tail["Close"].to_numpy(dtype=float),
+            "fit": np.exp(fit),
+            "lo1": np.exp(fit - sigma),
+            "hi1": np.exp(fit + sigma),
+            "lo2": np.exp(fit - 2 * sigma),
+            "hi2": np.exp(fit + 2 * sigma),
+        },
+        index=tail.index,
+    )
+
+
+def tactical_series(df: pd.DataFrame, cfg: TacticalCfg) -> pd.DataFrame:
+    """Per-bar history of the headline tactical metrics, for charting.
+
+    Columns: close, sma, z, drift_annual, atr_pct. Index matches *df*.
+    """
+    c = df["Close"].astype(float)
+    stats = trend_residual_stats(np.log(c.to_numpy()), cfg.z_window)
+    stats.index = df.index
+
+    atr = ta.atr(df["High"], df["Low"], c, length=cfg.atr_period)
+    return pd.DataFrame(
+        {
+            "close": c,
+            "sma": c.rolling(cfg.sma_window).mean(),
+            "z": stats["z"],
+            "drift_annual": stats["slope_daily"] * TRADING_DAYS_PER_YEAR,
+            "atr_pct": atr / c,
+        },
+        index=df.index,
+    )
+
+
+# --------------------------------------------------------------------------- #
+#  Public API                                                                  #
+# --------------------------------------------------------------------------- #
 
 def score_tactical(
     df: pd.DataFrame,
@@ -52,26 +174,25 @@ def score_tactical(
     Parameters
     ----------
     df:
-        OHLCV DataFrame indexed by date (DatetimeIndex or date index).
-        Must have columns: Open, High, Low, Close, Volume.
-        'Close' is treated as the adjusted close (providers must adjust
-        before passing here — see §4.2 and providers/base.py).
-        Must have ≥ max(sma_window, z_window, atr_baseline_window) + sma_slope_lookback
-        rows to be fully warmed up (≈ 280+ trading days with defaults).
+        OHLCV DataFrame indexed by date, ascending. Must have columns
+        Open, High, Low, Close, Volume with 'Close' already adjusted.
+        Needs ≥ max(sma_window, z_window, atr_baseline_window) +
+        sma_slope_lookback rows to be fully warmed up.
     cfg:
-        TacticalCfg — all thresholds/windows from config, no hard-coded constants.
+        TacticalCfg — all thresholds/windows from config.
     symbol:
         Ticker label written through to TechnicalState.symbol.
 
     Returns
     -------
-    TechnicalState with data_ok=True on success, data_ok=False (and M=1.0 fail-safe
-    via fusion) if any computation fails or the DataFrame is too short.
+    TechnicalState with data_ok=True on success, data_ok=False (→ fusion
+    degrades to M=1.0 fail-safe) if the frame is too short or any
+    computation fails.
     """
-    # ------------------------------------------------------------------ #
-    #  Guard: minimum rows needed for a fully-warmed-up reading           #
-    # ------------------------------------------------------------------ #
-    min_rows = max(cfg.sma_window, cfg.z_window, cfg.atr_baseline_window) + cfg.sma_slope_lookback
+    min_rows = (
+        max(cfg.sma_window, cfg.z_window, cfg.atr_baseline_window)
+        + cfg.sma_slope_lookback
+    )
     if df is None or len(df) < min_rows:
         logger.warning(
             "score_tactical(%s): insufficient data (%d rows, need %d). "
@@ -80,9 +201,6 @@ def score_tactical(
         )
         return _fail_safe(symbol)
 
-    # ------------------------------------------------------------------ #
-    #  Extract series; validate required columns                          #
-    # ------------------------------------------------------------------ #
     required = {"High", "Low", "Close"}
     missing = required - set(df.columns)
     if missing:
@@ -96,84 +214,57 @@ def score_tactical(
         return _fail_safe(symbol)
 
 
-# --------------------------------------------------------------------------- #
-#  Internal computation (separated so try/except is clean)                    #
-# --------------------------------------------------------------------------- #
-
 def _compute(df: pd.DataFrame, cfg: TacticalCfg, symbol: str) -> TechnicalState:
-    c = df["Close"]
+    c = df["Close"].astype(float)
     high = df["High"]
     low = df["Low"]
 
     # ------------------------------------------------------------------ #
-    #  1. 200-day SMA + slope                                             #
+    #  1. SMA + slope                                                     #
     # ------------------------------------------------------------------ #
     sma = c.rolling(cfg.sma_window).mean()
     sma_now = float(sma.iloc[-1])
-
-    # Slope = sign of SMA[t] − SMA[t−k]: positive = upward, negative = downward.
-    # Store the raw difference so the fusion layer can use the magnitude if needed,
-    # but the guard only needs the sign.
     sma_slope = float(sma.iloc[-1] - sma.iloc[-1 - cfg.sma_slope_lookback])
 
     # ------------------------------------------------------------------ #
-    #  2. Rolling Z-score on log price (§6.1)                            #
-    #     Z = (ln P − μ_W) / σ_W  — negative = cheap                    #
+    #  2. Trend-residual Z on log price                                   #
     # ------------------------------------------------------------------ #
-    logp = np.log(c)
-    mu = logp.rolling(cfg.z_window).mean()
-    sig = logp.rolling(cfg.z_window).std()
-
-    sig_last = float(sig.iloc[-1])
-    if sig_last == 0.0 or np.isnan(sig_last):
-        # Degenerate: all prices identical in window — treat as at-mean
-        z = 0.0
-    else:
-        z = float((logp.iloc[-1] - mu.iloc[-1]) / sig_last)
+    logp = np.log(c.to_numpy())
+    stats = trend_residual_stats(logp, cfg.z_window)
+    z_now = float(stats["z"].iloc[-1])
+    sigma_resid = float(stats["sigma_resid"].iloc[-1])
+    drift_annual = float(stats["slope_daily"].iloc[-1]) * TRADING_DAYS_PER_YEAR
+    if np.isnan(z_now):
+        z_now = 0.0  # degenerate window (e.g. constant prices) — at trend
 
     # ------------------------------------------------------------------ #
-    #  3. ATR% and vol_factor (§6.2, §6.3)                               #
+    #  3. ATR% and vol_factor                                             #
     # ------------------------------------------------------------------ #
-    # ATR% = ATR(14) / Close — volatility as a fraction of price.
-    # pandas_ta_classic returns a Series named "ATRr_<length>" or similar;
-    # access it generically via .iloc to avoid name-format assumptions.
     atr_series = ta.atr(high, low, c, length=cfg.atr_period)
-    atr_pct_series: pd.Series = atr_series / c  # element-wise normalisation
+    atr_pct_series: pd.Series = atr_series / c
 
     atr_pct_now = float(atr_pct_series.iloc[-1])
-
-    # atr_pct_baseline = long rolling median (default 252 days ≈ 1 year).
-    # Using median (not mean) so a single vol-spike doesn't inflate the baseline.
+    # Median (not mean) so a single vol spike doesn't inflate the baseline.
     atr_pct_baseline = float(
         atr_pct_series.rolling(cfg.atr_baseline_window).median().iloc[-1]
     )
 
-    # vol_factor: 1.0 = current vol matches baseline (normal); < 1 = elevated vol.
-    # Clamp to [g_vol_min, 1.0] — never allow vol alone to eliminate the position.
     if atr_pct_now <= 0 or np.isnan(atr_pct_now) or np.isnan(atr_pct_baseline):
         vol_factor = 1.0  # can't compute; fail safe toward allowing normal DCA
     else:
         vol_factor = _clamp(atr_pct_baseline / atr_pct_now, cfg.g_vol_min, 1.0)
 
     # ------------------------------------------------------------------ #
-    #  4. ADX(14) + DMI (§6.2)                                           #
+    #  4. ADX                                                             #
     # ------------------------------------------------------------------ #
-    # ta.adx returns a DataFrame with columns ADX_<n>, DMP_<n>, DMN_<n>.
     adx_df = ta.adx(high, low, c, length=cfg.adx_period)
     adx_col = f"ADX_{cfg.adx_period}"
     if adx_col not in adx_df.columns:
-        # Fallback: use the first column that starts with ADX
         adx_col = next((col for col in adx_df.columns if col.startswith("ADX")), None)
     adx = float(adx_df[adx_col].iloc[-1]) if adx_col else float("nan")
 
     # ------------------------------------------------------------------ #
-    #  5. RSI(14) (§6.2)                                                  #
-    # ------------------------------------------------------------------ #
-    rsi = float(ta.rsi(c, length=cfg.rsi_period).iloc[-1])
-
-    # ------------------------------------------------------------------ #
-    #  6. Derived tactical guard (§6.3)                                   #
-    #     trend_strong_down: Close < SMA200 AND slope < 0 AND ADX > thresh
+    #  5. Falling-knife guard                                             #
     # ------------------------------------------------------------------ #
     price_now = float(c.iloc[-1])
     trend_strong_down = bool(
@@ -183,9 +274,6 @@ def _compute(df: pd.DataFrame, cfg: TacticalCfg, symbol: str) -> TechnicalState:
         and adx > cfg.adx_trend_thresh
     )
 
-    # ------------------------------------------------------------------ #
-    #  7. Determine as_of date from DataFrame index                       #
-    # ------------------------------------------------------------------ #
     last_idx = df.index[-1]
     if hasattr(last_idx, "date"):
         as_of: date | None = last_idx.date()
@@ -199,11 +287,13 @@ def _compute(df: pd.DataFrame, cfg: TacticalCfg, symbol: str) -> TechnicalState:
         price=price_now,
         sma200=sma_now,
         sma_slope=sma_slope,
-        z=z,
+        z=z_now,
+        trend_drift_annual=drift_annual,
+        sigma_resid=sigma_resid,
         atr_pct=atr_pct_now,
+        atr_pct_baseline=atr_pct_baseline,
         vol_factor=vol_factor,
         adx=adx,
-        rsi=rsi,
         trend_strong_down=trend_strong_down,
         as_of=as_of,
         data_ok=True,
@@ -213,7 +303,7 @@ def _compute(df: pd.DataFrame, cfg: TacticalCfg, symbol: str) -> TechnicalState:
 def _fail_safe(symbol: str) -> TechnicalState:
     """Return a safe TechnicalState that signals data failure to the fusion layer.
 
-    data_ok=False causes fusion to degrade to M=1.0 (standard DCA) per §1.3 #3.
+    data_ok=False causes fusion to degrade to M=1.0 (standard DCA).
     All numeric fields are set to neutral / non-triggering values.
     """
     return TechnicalState(
@@ -221,11 +311,13 @@ def _fail_safe(symbol: str) -> TechnicalState:
         price=float("nan"),
         sma200=float("nan"),
         sma_slope=0.0,
-        z=0.0,          # neutral — no signal
+        z=0.0,                # neutral — no signal
+        trend_drift_annual=0.0,
+        sigma_resid=float("nan"),
         atr_pct=float("nan"),
-        vol_factor=1.0,  # neutral — don't damp aggression
+        atr_pct_baseline=float("nan"),
+        vol_factor=1.0,       # neutral — don't damp aggression
         adx=0.0,
-        rsi=50.0,        # neutral midpoint
         trend_strong_down=False,
         as_of=None,
         data_ok=False,

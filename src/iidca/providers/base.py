@@ -10,10 +10,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import date, timedelta
-from typing import Protocol
 
 import pandas as pd
-
 
 # ---------------------------------------------------------------------------
 # MarketDataProvider ABC
@@ -96,6 +94,16 @@ class DataValidationError(ValueError):
     """Raised when ingested data fails structural or staleness checks."""
 
 
+def clean_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop rows with missing price data.
+
+    Live sources sometimes append a half-formed bar for the current session
+    (NaN OHLC, volume only) — keeping it would silently poison every
+    indicator computed off the last row.
+    """
+    return df.dropna(subset=[c for c in ("Open", "High", "Low", "Close") if c in df.columns])
+
+
 def validate_ohlcv(df: pd.DataFrame, symbol: str, staleness_days: int = 5) -> None:
     """Validate a raw OHLCV DataFrame from any provider.
 
@@ -123,6 +131,10 @@ def validate_ohlcv(df: pd.DataFrame, symbol: str, staleness_days: int = 5) -> No
     all_nan = [c for c in REQUIRED_OHLCV_COLUMNS if df[c].isna().all()]
     if all_nan:
         raise DataValidationError(f"{symbol}: all-NaN columns {all_nan}")
+
+    last_close = df["Close"].iloc[-1]
+    if last_close != last_close:  # NaN — half-formed live bar slipped through
+        raise DataValidationError(f"{symbol}: last bar has NaN Close (use clean_ohlcv first)")
 
     if not df.index.is_monotonic_increasing:
         raise DataValidationError(f"{symbol}: OHLCV index is not monotonically increasing")

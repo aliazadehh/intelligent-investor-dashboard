@@ -1,20 +1,32 @@
 # Intelligent Investor DCA Dashboard — default configuration
 # All thresholds, weights, and bounds live here. Changing risk appetite = editing this file.
-# See config_hash in snapshots (§9.4) — every past recommendation is attributable to an exact
-# parameter set stored here.
+# Every snapshot stores a config_hash so any past recommendation is attributable
+# to an exact parameter set.
 
-target_symbol = "QQQ"
-market_provider = "yfinance"   # yfinance | stooq | tiingo | tradingview
-refresh_hours  = 24            # dashboard auto-refresh cadence (hours); 24=daily, 168=weekly
+# Seeds the persistent watchlist on first run; assets added in the dashboard
+# are stored in the local database, not here.
+watchlist = ["QQQ"]
+
+# Ordered fallback chain — the first provider that returns valid data wins.
+# Available: yfinance | stooq | tiingo | tradingview
+provider_chain = ["yfinance", "stooq"]
+
+lookback_days = 1200   # calendar days of price history to fetch & cache
+refresh_hours = 24     # dashboard auto-refresh cadence (hours); 24=daily, 168=weekly
 
 [macro]
-# Sub-score ramp boundaries (see §5.1)
+# Sub-score ramp boundaries
 sahm_trigger      = 0.50   # ≥ triggers SAHM_RECESSION circuit breaker
 curve_inv_floor   = -0.5   # worst inversion → sub-score 0
 curve_healthy_ref = 1.0    # healthy spread → sub-score 1
 stress_calm_lo    = -1.0   # calm → sub-score 1
 stress_hi         = 1.0    # stressed → sub-score 0
 stress_crisis     = 1.5    # ≥ triggers FIN_STRESS_CRISIS circuit breaker
+
+# NFCI ramp — used only as fallback for the stress pillar when STLFSI4
+# is unavailable (NFCI runs on a different scale than STLFSI4).
+nfci_calm_lo = -0.60
+nfci_hi      = 0.30
 
 # Macro Health Score weights (must sum to 1.0)
 w_sahm   = 0.40
@@ -25,6 +37,16 @@ w_stress = 0.35
 regime_expansion = 0.66
 regime_caution   = 0.40
 
+# Curve dis-inversion soft breaker: if the 10Y-2Y spread was below
+# disinv_inverted_thresh within the last disinv_lookback_days and is now
+# above disinv_recovered_thresh, the regime is capped at CAUTION.
+# (The re-steepening after a deep inversion — not the inversion itself —
+# has historically been the proximate pre-recession signal.)
+disinv_enabled         = true
+disinv_inverted_thresh = -0.10
+disinv_recovered_thresh = 0.0
+disinv_lookback_days   = 365
+
 # FRED series IDs. STLFSI4 is current (STLFSI3 discontinued 2022-10-28).
 [macro.series]
 sahm    = "SAHMREALTIME"
@@ -33,24 +55,39 @@ stlfsi  = "STLFSI4"
 nfci    = "NFCI"
 
 [tactical]
-z_window            = 200   # rolling Z-score window (trading days)
-sma_window          = 200   # SMA window
+# Z is the trend-residual Z-score: standardized deviation of log price from
+# its rolling OLS trendline over z_window days. Mean-zero on trending assets
+# by construction (the v1 rolling-mean Z read ≈ +1.7σ on any steady uptrend).
+z_window            = 200   # trading days for the trendline fit
+sma_window          = 200   # SMA window (falling-knife guard)
 sma_slope_lookback  = 20    # days back for SMA slope sign
 adx_period          = 14
-rsi_period          = 14
 atr_period          = 14
-atr_baseline_window = 252   # long-run ATR% median window
+atr_baseline_window = 252   # long-run ATR% median window ("normal vol")
 adx_trend_thresh    = 25.0  # ADX above this = strong trend
 g_vol_min           = 0.40  # floor for vol_factor (never damp aggression below 40%)
 staleness_days      = 5     # max age of last market bar before data_ok=False
 
 [fusion]
-alpha        = 0.75   # max tilt amplitude (pre-gate range [1-α, 1+α] = [0.25, 1.75])
-beta         = 1.5    # tanh saturation scale (std devs)
+alpha        = 0.75   # max tilt amplitude (pre-gate range [1-α, 1+α])
+beta         = 1.5    # tanh saturation scale (σ of trend deviation)
 lam          = 1.0    # defensive amplifier when macro weak (factor ∈ [1, 1+lam])
+
+# Macro gate ramp: aggression × clamp((H − gate_floor_h)/(gate_full_h − gate_floor_h), 0, 1).
+# H ≥ gate_full_h passes aggression fully; H ≤ gate_floor_h zeroes it.
+gate_floor_h = 0.40
+gate_full_h  = 0.75
+
 g_trend_down = 0.30   # guard multiplier when trend_strong_down=True
 m_cap_exp    = 2.00   # regime cap: EXPANSION
 m_cap_caution = 1.25  # regime cap: CAUTION
 m_cap_stress  = 1.00  # regime cap: STRESS (never lever into a collapsing tape)
 m_min         = 0.25  # global floor — never fully stop DCA
 m_max         = 2.00  # global ceiling
+
+# Allocation label tiers (upper bounds, exclusive, ascending)
+[fusion.labels]
+defensive_max     = 0.60
+cautious_max      = 0.90
+standard_max      = 1.10
+opportunistic_max = 1.40

@@ -10,6 +10,7 @@ yfinance>=0.2.55
 duckdb>=1.1
 pyarrow>=16
 streamlit>=1.36
+plotly>=5.22
 python-telegram-bot>=21.0
 rich>=13
 click>=8.1

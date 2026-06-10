@@ -1,13 +1,12 @@
-"""T13 — Alert delivery: Telegram (primary) + SMTP email (fallback) (§9.3).
+"""Alert delivery: Telegram (primary) + SMTP email (fallback).
 
-Monthly alert content:
-  - Zone 1 status + color
-  - DCA multiplier M + label + one-line instruction
-  - Three macro sub-scores (sahm, curve, stress)
+Cycle alert content:
+  - Global macro status + H + any breakers
+  - Per asset: DCA multiplier M + label + trend-residual Z
   - Snapshot as_of date
 
-Idempotency: the snapshot's alerted_at is checked before sending.
-If it is already set, the alert is skipped (no re-send for the same run).
+Idempotency: the caller checks/sets alerted_at on the snapshot rows before
+re-sending for the same run.
 """
 
 from __future__ import annotations
@@ -15,39 +14,48 @@ from __future__ import annotations
 import logging
 import os
 import smtplib
-from datetime import datetime, timezone
 from email.mime.text import MIMEText
+from typing import TYPE_CHECKING
 
-from iidca.models import Decision, MacroState
+if TYPE_CHECKING:
+    from iidca.run import CycleResult
 
 logger = logging.getLogger(__name__)
 
 
-def _format_message(macro: MacroState, decision: Decision) -> str:
-    breaker_note = ""
-    if macro.breakers_fired:
-        breaker_note = f"\n⚠️  Circuit breakers: {', '.join(macro.breakers_fired)}"
+def _format_message(result: CycleResult) -> str:
+    macro = result.macro
+    any_decision = next(iter(result.assets.values())).decision if result.assets else None
+    status = any_decision.status if any_decision else macro.regime
+
+    fired = macro.breakers_fired + macro.soft_breakers_fired
+    breaker_note = f"\n⚠️  Breakers: {', '.join(fired)}" if fired else ""
 
     sub = macro.subscores
-    return (
-        f"📊 *Intelligent Investor — Monthly DCA Signal*\n\n"
-        f"*Zone 1:* {decision.status}{breaker_note}\n"
-        f"*Macro Health H:* {macro.H:.2f}\n\n"
-        f"*DCA Multiplier:* {decision.M:.2f}× — {decision.label}\n"
-        f"_{decision.instruction}_\n\n"
-        f"*Macro sub-scores:*\n"
-        f"  Sahm: {sub.get('sahm', 0):.2f}  |  "
-        f"Curve: {sub.get('curve', 0):.2f}  |  "
-        f"Stress: {sub.get('stress', 0):.2f}\n\n"
-        f"As of: {macro.as_of}"
-    )
+    lines = [
+        "📊 *Intelligent Investor — DCA Signal*",
+        "",
+        f"*Macro:* {status}{breaker_note}",
+        f"*Health H:* {macro.H:.2f}  "
+        f"(Sahm {sub.get('sahm', 0):.2f} · Curve {sub.get('curve', 0):.2f} · "
+        f"Stress {sub.get('stress', 0):.2f})",
+        "",
+    ]
+    for symbol, res in result.assets.items():
+        t, d = res.tech, res.decision
+        flag = "" if t.data_ok else "  ⚠ fail-safe"
+        lines.append(f"*{symbol}:* {d.M:.2f}× — {d.label}  (Z {t.z:+.2f}){flag}")
+        lines.append(f"_{d.instruction}_")
+    lines.append("")
+    lines.append(f"As of: {macro.as_of}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
 # Telegram
 # ---------------------------------------------------------------------------
 
-def send_telegram(macro: MacroState, decision: Decision) -> bool:
+def send_telegram(result: CycleResult) -> bool:
     """Send alert via Telegram bot.  Returns True on success."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -57,7 +65,7 @@ def send_telegram(macro: MacroState, decision: Decision) -> bool:
 
     try:
         import requests  # noqa: PLC0415
-        text = _format_message(macro, decision)
+        text = _format_message(result)
         resp = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
             json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
@@ -75,7 +83,7 @@ def send_telegram(macro: MacroState, decision: Decision) -> bool:
 # SMTP email fallback
 # ---------------------------------------------------------------------------
 
-def send_email(macro: MacroState, decision: Decision) -> bool:
+def send_email(result: CycleResult) -> bool:
     """Send alert via SMTP.  Returns True on success.
 
     Required env vars:
@@ -94,9 +102,10 @@ def send_email(macro: MacroState, decision: Decision) -> bool:
         from_addr = os.environ.get("ALERT_FROM_EMAIL", user)
         to_addr = os.environ.get("ALERT_TO_EMAIL", user)
 
-        plain = _format_message(macro, decision).replace("*", "").replace("_", "")
+        plain = _format_message(result).replace("*", "").replace("_", "")
         msg = MIMEText(plain)
-        msg["Subject"] = f"DCA Signal: {decision.label} {decision.M:.2f}× — {decision.status}"
+        macro = result.macro
+        msg["Subject"] = f"DCA Signal — {macro.regime}, {len(result.assets)} asset(s)"
         msg["From"] = from_addr
         msg["To"] = to_addr
 
@@ -117,8 +126,8 @@ def send_email(macro: MacroState, decision: Decision) -> bool:
 # Public interface
 # ---------------------------------------------------------------------------
 
-def send_alert(macro: MacroState, decision: Decision) -> bool:
+def send_alert(result: CycleResult) -> bool:
     """Try Telegram first, fall back to email.  Returns True if any succeeded."""
-    if send_telegram(macro, decision):
+    if send_telegram(result):
         return True
-    return send_email(macro, decision)
+    return send_email(result)

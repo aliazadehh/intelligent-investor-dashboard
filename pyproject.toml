@@ -20,6 +20,8 @@ dependencies = [
     "duckdb>=1.1",
     "pyarrow>=16",
     "streamlit>=1.36",
+    "plotly>=5.22",
+    "pandas-datareader>=0.10",
     "python-telegram-bot>=21.0",
     "rich>=13",
     "click>=8.1",
@@ -55,6 +57,13 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# Dashboard needs the sys.path shim before imports (Streamlit Cloud).
+"src/iidca/dashboard.py" = ["E402", "E501"]
+# Plain-language reading sentences are clearer unwrapped.
+"src/iidca/ui/readings.py" = ["E501"]
+"src/iidca/ui/components.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"

@@ -1,8 +1,19 @@
 # Intelligent Investor — Quantitative DCA Dashboard
 
-A personal decision-support tool that tells you **how much to invest this month** by combining a macro health score with a statistical measure of how cheap or expensive your target asset is right now.
+A personal decision-support tool that tells you **how much to invest this
+period, per asset**, by combining one global macro health score with a
+per-asset statistical measure of how far price sits from its own trend.
 
-One number in, one number out: **M** (the DCA multiplier). M = 1.0 means invest your normal amount. M = 0.5 means invest half. M = 1.75 means invest 75% extra. You read it, you decide, the system never trades for you.
+One number out per asset: **M** (the DCA multiplier). M = 1.0 means invest
+your normal amount. M = 0.5 means invest half. M = 1.75 means invest 75%
+extra. You read it, you decide — the system never trades for you.
+
+Track any ticker your data providers know (equities, ETFs, crypto pairs):
+the **macro engine is global and shared**, the **valuation/tactical engine
+runs per asset**.
+
+> Model changes and their rationale are logged in [DECISIONS.md](DECISIONS.md).
+> Every threshold in this document is a parameter in `config/default.toml`.
 
 ---
 
@@ -10,29 +21,42 @@ One number in, one number out: **M** (the DCA multiplier). M = 1.0 means invest 
 
 1. [The Big Idea](#1-the-big-idea)
 2. [Data Sources](#2-data-sources)
-3. [Zone 2A — Macro Engine](#3-zone-2a--macro-engine)
-4. [Zone 2B — Tactical Engine](#4-zone-2b--tactical-engine)
-5. [Zone 3 — Fusion: How M is Calculated](#5-zone-3--fusion-how-m-is-calculated)
-6. [Zone 1 — Global System Status](#6-zone-1--global-system-status)
-7. [Reading the Dashboard](#7-reading-the-dashboard)
-8. [Worked Examples](#8-worked-examples)
-9. [Configuration Reference](#9-configuration-reference)
-10. [Running the Project](#10-running-the-project)
+3. [Macro Engine (global)](#3-macro-engine-global)
+4. [Tactical Engine (per asset)](#4-tactical-engine-per-asset)
+5. [Fusion: How M is Calculated](#5-fusion-how-m-is-calculated)
+6. [Reading the Dashboard](#6-reading-the-dashboard)
+7. [Worked Examples](#7-worked-examples)
+8. [Configuration Reference](#8-configuration-reference)
+9. [Running the Project](#9-running-the-project)
 
 ---
 
 ## 1. The Big Idea
 
-Dollar-cost averaging (DCA) means investing a fixed amount on a fixed schedule regardless of price. It is simple and effective. But it ignores two things that matter:
+Dollar-cost averaging (DCA) means investing a fixed amount on a fixed
+schedule regardless of price. It is simple and effective. But it ignores two
+things that matter:
 
-1. **Is the macro environment healthy?** Buying aggressively into a recession is "catching a falling knife" — the asset is cheap because the economy is collapsing, not because it is temporarily oversold.
-2. **Is the asset actually cheap right now?** Sometimes the macro is fine but the asset has just had a huge run-up and is statistically expensive. Deploying extra in that moment is poor timing.
+1. **Is the macro environment healthy?** Buying aggressively into a recession
+   is "catching a falling knife" — the asset is cheap because the economy is
+   collapsing, not because it is temporarily oversold.
+2. **Is the asset actually cheap right now?** Sometimes the macro is fine but
+   the asset has overshot its own trend. Deploying extra in that moment is
+   poor timing.
 
-This system addresses both. It modulates *how much* you deploy each period — not whether you DCA at all. You never fully stop (that defeats the strategy), but you deploy more when conditions are genuinely favourable and less when they are not.
+This system modulates *how much* you deploy each period — never whether you
+DCA at all. You never fully stop (that defeats the strategy), but you deploy
+more when conditions are genuinely favourable and less when they are not.
 
-The core principle, stated plainly:
+The core principle:
 
-> **A cheap price only justifies buying more if the macro regime is healthy enough that the cheapness is noise around a stable mean — not a signal that the mean itself is collapsing.**
+> **A cheap price only justifies buying more if the macro regime is healthy
+> enough that the cheapness is noise around a stable trend — not a signal
+> that the trend itself is collapsing.**
+
+And its structural corollary (asymmetric caution): defensiveness is always
+permitted; aggression must be *earned* — by macro health, a non-collapsing
+trend, and a normal-volatility environment, all at once.
 
 ---
 
@@ -40,598 +64,353 @@ The core principle, stated plainly:
 
 ### Macro data — FRED (Federal Reserve Economic Data)
 
-Fetched via the `fredapi` library (free API key required from fred.stlouisfed.org). Cached locally as Parquet files so monthly runs are fast and offline-resilient.
+Fetched via `fredapi` (free API key) with a raw-HTTP fallback, cached locally
+as Parquet so runs are fast and offline-resilient.
 
-| Series ID | What it measures | Frequency | Why it matters |
-|---|---|---|---|
-| `SAHMREALTIME` | **Sahm Rule indicator** — rise in unemployment from its recent low, in percentage points | Monthly | The most reliable real-time recession signal. When it hits 0.50, a recession has historically already started. |
-| `T10Y2Y` | **Yield curve** — 10-year minus 2-year Treasury yield spread, in percentage points | Daily | Negative (inverted) = bond market expects future rate cuts = recession concern. Positive = normal. |
-| `STLFSI4` | **St. Louis Fed Financial Stress Index** — composite of interest rates, yield spreads, and other financial indicators | Weekly | Mean of 0. Above 0 = above-average stress. Above 1.5 = acute liquidity event (crisis-level). |
-| `NFCI` | **Chicago Fed National Financial Conditions Index** | Weekly | Secondary cross-check on financial conditions. Above 0 = tighter than average. |
+| Series ID | What it measures | Role |
+|---|---|---|
+| `SAHMREALTIME` | **Sahm Rule** — rise in unemployment from its recent low (pp) | Coincident/realized. The most reliable real-time "recession has begun" signal (fires at 0.50). |
+| `T10Y2Y` | **Yield curve** — 10Y minus 2Y Treasury spread (pp) | Leading, noisy. The *level* feeds H; the *dis-inversion pattern* feeds a soft breaker (see §3). |
+| `STLFSI4` | **St. Louis Fed Financial Stress Index** | Coincident liquidity/stress. Mean 0; ≥ 1.5 = crisis. |
+| `NFCI` | **Chicago Fed Financial Conditions Index** | Fallback source for the stress pillar if STLFSI4 is unavailable — no single point of failure. |
 
-> ⚠️ **Important:** The series is `STLFSI4`, not `STLFSI3`. STLFSI3 was discontinued in October 2022 and frozen — using it would silently feed 3-year-stale data.
+> ⚠️ The series is `STLFSI4` — STLFSI3 was discontinued in October 2022 and
+> would silently feed stale data.
 
 ### Market data — price history
 
-Fetched via `yfinance` by default (configurable). Returns daily OHLCV data with **adjusted close** — meaning splits and dividends are already factored in. The system needs at least ~300 trading days of history to warm up the 200-day indicators.
+Daily OHLCV with **adjusted close** (splits/dividends factored in), fetched
+through an ordered, config-driven **provider chain** — first source that
+returns valid data wins:
 
-**Provider fallback order** (set in config):
-- `yfinance` — default, free, scrapes Yahoo Finance
-- `stooq` — free, no API key, uses pandas-datareader
-- `tiingo` — paid but cheap, deep history, requires `TIINGO_API_KEY`
-- `tradingview` — push-based via a local webhook server
+- `yfinance` — default; equities, ETFs, crypto pairs (e.g. `BTC-USD`)
+- `stooq` — free, no key (US equities/ETFs)
+- `tiingo` — paid, requires `TIINGO_API_KEY`
+- last-good **Parquet cache** — final fallback if every provider fails; the
+  decision then degrades to the M = 1.0 fail-safe but numbers stay visible
+
+Half-formed live bars (NaN prices) are dropped at ingestion; stale data
+(older than `staleness_days`) is rejected.
 
 ---
 
-## 3. Zone 2A — Macro Engine
+## 3. Macro Engine (global)
 
-**File:** `src/iidca/engines/macro.py`
-**Output:** `MacroState` — a health score plus a regime label
+**File:** `src/iidca/engines/macro.py` · **Output:** `MacroState` — health
+score H, regime label, breakers. Computed **once per cycle**, shared by all
+assets.
 
 ### Step 1: Convert each raw reading to a sub-score
 
-Each FRED reading is mapped to a score between 0 and 1, where **1 = healthy** and **0 = maximum stress**. The mapping is a clamped linear ramp between two reference points.
-
----
-
-**Sahm sub-score** (`s_sahm`)
+Each reading maps to [0, 1] (1 = healthy) via a clamped linear ramp:
 
 ```
-s_sahm = clamp( (0.50 − sahm_reading) / 0.50,  min=0, max=1 )
+s_sahm   = clamp( (0.50 − sahm) / 0.50 ,            0, 1 )   # 0.50 = recession trigger
+s_curve  = clamp( (spread + 0.5) / 1.5 ,            0, 1 )   # −0.5 = max inversion, +1.0 = healthy
+s_stress = clamp( (1.0 − stlfsi) / 2.0 ,            0, 1 )   # −1 calm … +1 stressed
 ```
 
-| Sahm reading | s_sahm | Interpretation |
-|---|---|---|
-| 0.00 | 1.00 | No unemployment rise — fully healthy |
-| 0.25 | 0.50 | Moderate deterioration |
-| 0.50 | 0.00 | Recession signal fired — fully stressed |
-| > 0.50 | 0.00 (clamped) | Deep recession |
-
----
-
-**Yield curve sub-score** (`s_curve`)
-
-```
-s_curve = clamp( (spread − (−0.5)) / (1.0 − (−0.5)),  min=0, max=1 )
-         = clamp( (spread + 0.5) / 1.5,  min=0, max=1 )
-```
-
-| Spread (10Y−2Y) | s_curve | Interpretation |
-|---|---|---|
-| +1.0 pp or above | 1.00 | Healthy, normal yield curve |
-| 0.0 pp | 0.33 | Flat — warning sign |
-| −0.5 pp | 0.00 | Maximum inversion — fully stressed |
-| < −0.5 pp | 0.00 (clamped) | Deep inversion |
-
----
-
-**Financial stress sub-score** (`s_stress`)
-
-```
-s_stress = clamp( (1.0 − stlfsi4) / (1.0 − (−1.0)),  min=0, max=1 )
-          = clamp( (1.0 − stlfsi4) / 2.0,  min=0, max=1 )
-```
-
-| STLFSI4 | s_stress | Interpretation |
-|---|---|---|
-| −1.0 or below | 1.00 | Unusually calm financial conditions |
-| 0.0 | 0.50 | Average conditions |
-| +1.0 | 0.00 | High stress — fully stressed sub-score |
-| > +1.0 | 0.00 (clamped) | Crisis territory |
-
----
+If STLFSI4 is unavailable, the stress pillar falls back to NFCI with its own
+ramp (different scale); the snapshot records which source was used.
 
 ### Step 2: Blend into the Macro Health Score H
 
 ```
-H = 0.40 × s_sahm  +  0.25 × s_curve  +  0.35 × s_stress
+H = 0.40·s_sahm + 0.25·s_curve + 0.35·s_stress        ∈ [0, 1]
 ```
 
-H is always in [0, 1]. Weights reflect confidence in each signal:
-- Sahm (40%) — highest weight because it is the most reliable *realised* recession signal
-- STLFSI4 (35%) — coincident and forward-looking on liquidity conditions
-- Yield curve (25%) — useful but noisy, with variable lead/lag
+Weights reflect signal quality: Sahm (realized, reliable) > stress
+(coincident) > curve level (leading but noisy, with variable lead time).
 
----
+### Step 3: Breakers — hard and soft
 
-### Step 3: Circuit breakers
+Breakers can only *worsen* the regime, never improve it.
 
-Two hard overrides that **can only make the regime worse, never better**:
-
-| Condition | Breaker name | Effect |
+| Condition | Breaker | Effect |
 |---|---|---|
-| `sahm_reading ≥ 0.50` | `SAHM_RECESSION` | Forces regime to STRESS regardless of H |
-| `stlfsi4 ≥ 1.5` | `FIN_STRESS_CRISIS` | Forces regime to STRESS regardless of H |
+| `sahm ≥ 0.50` | `SAHM_RECESSION` (hard) | Forces STRESS |
+| `stlfsi ≥ 1.5` | `FIN_STRESS_CRISIS` (hard) | Forces STRESS |
+| Curve was ≤ −0.10pp within 365d and is now > 0 | `CURVE_DISINVERSION` (soft) | Caps regime at CAUTION |
 
----
+The dis-inversion breaker exists because historically the **re-steepening
+after** a deep inversion — not the inversion itself — is the proximate
+pre-recession window, exactly when the level score recovers and looks healthy
+again. It is recomputed from the series each run and self-expires.
 
 ### Step 4: Assign regime from H
-
-If no circuit breaker fired:
 
 | H range | Regime | Meaning |
 |---|---|---|
 | H ≥ 0.66 | **EXPANSION** | Healthy macro — aggression permitted |
-| 0.40 ≤ H < 0.66 | **CAUTION** | Deteriorating — reduce aggression cap |
-| H < 0.40 | **STRESS** | Collapsing — no aggressive buying, ever |
+| 0.40 ≤ H < 0.66 | **CAUTION** | Deteriorating — aggression capped at 1.25× |
+| H < 0.40 | **STRESS** | Collapsing — never above baseline |
 
 ---
 
-### MacroState output
+## 4. Tactical Engine (per asset)
+
+**File:** `src/iidca/engines/tactical.py` · **Output:** `TechnicalState`.
+All metrics are **dimensionless and self-normalizing**, so one parameter set
+generalizes across equities, ETFs, and crypto.
+
+### Trend-residual Z-score — the valuation signal
 
 ```
-H          = 0.766          ← composite health score
-regime     = "EXPANSION"    ← discrete label
-subscores  = {sahm: 0.94, curve: 0.72, stress: 0.61}
-breakers   = []             ← none fired
-as_of      = 2026-05-29
-data_ok    = True
+fit:  ln P_k ≈ a + b·k        (OLS over the last 200 trading days)
+Z  =  (ln P_today − fit_today) / σ_residuals
 ```
 
----
+Z measures how far price sits **above or below the asset's own fitted trend
+channel**, in units of that channel's typical width. Negative = below trend
+= cheap relative to the asset's recent path.
 
-## 4. Zone 2B — Tactical Engine
+Why not distance from the 200-day *mean*? Because on any steadily trending
+asset that statistic converges to a constant **+1.73σ regardless of the
+growth rate** — it flags trends, not value, and would permanently starve
+strong-trend assets (see DECISIONS.md #1). The residual Z is mean-zero on a
+pure trend by construction. The dashboard draws the fitted channel (±1σ/±2σ)
+on the price chart so the number is never abstract.
 
-**File:** `src/iidca/engines/tactical.py`
-**Output:** `TechnicalState` — where the asset sits relative to its own history
-
-All calculations use the **adjusted close** price.
-
----
-
-### 200-day Simple Moving Average (SMA200)
-
-```
-SMA200[t] = average of the last 200 daily closing prices
-```
-
-**SMA slope** = `SMA200[today] − SMA200[20 days ago]`
-- Positive slope = the trend is rising
-- Negative slope = the trend is falling
-
-The SMA200 is the canonical "is this asset in a long-term uptrend?" indicator.
-
----
-
-### Z-score
-
-```
-Z = (ln(price_today) − mean(ln(price), last 200 days))
-    ─────────────────────────────────────────────────────
-         std_dev(ln(price), last 200 days)
-```
-
-Log price is used (not raw price) so the dispersion measure is scale-stable — a $500 stock and a $50 stock are comparable.
-
-| Z | Interpretation |
+| Z | Reading |
 |---|---|
-| +3 or above | Extremely expensive — 3 standard deviations above the 200-day mean |
-| +1 to +2 | Above average — moderately expensive |
-| 0 | Exactly at the 200-day mean — fair value by this measure |
-| −1 to −2 | Below average — moderately cheap |
-| −3 or below | Extremely cheap — deep statistical discount |
+| ≤ −2 | Very cheap vs trend — the setup the system sizes up into |
+| −2 … −1 | Cheap vs trend |
+| −1 … +1 | On trend — no signal |
+| +1 … +2 | Stretched above trend |
+| ≥ +2 | Very stretched — trims the period's buy |
 
-**Current reading: Z = +3.114** — QQQ is ~3 standard deviations above its 200-day mean. Historically stretched.
+### Volatility guard — ATR% vs the asset's own norm
+
+```
+ATR%        = ATR(14) / Close
+baseline    = rolling 252-day median of ATR%
+vol_factor  = clamp( baseline / ATR%_today , 0.40, 1.0 )
+```
+
+Vol spikes scale down *extra* buying (knives fall fastest in high-vol
+regimes); the 0.40 floor means dampening never fully cancels a planned
+opportunity. Self-normalizing: a 4%-daily-range crypto and a 1% ETF are each
+measured against their own baseline.
+
+### Falling-knife guard
+
+```
+trend_strong_down = price < SMA200  AND  SMA200 falling  AND  ADX(14) > 25
+```
+
+All three at once = a strong, established downtrend. Any extra buying is cut
+to 30% (`g_trend_down`). ADX is displayed on the dashboard *in this role* —
+it is a guard input, not a standalone signal.
 
 ---
 
-### ATR% — Volatility measure
+## 5. Fusion: How M is Calculated
+
+**File:** `src/iidca/engines/fusion.py` · **Output:** `Decision` with the
+full derivation (rendered as a waterfall chart in the dashboard).
+
+### Step 1 — Technical tilt T(Z)
 
 ```
-ATR(14) = average of the daily true range (High − Low adjusted for gaps) over 14 days
-ATR%    = ATR(14) / Close
+T(Z) = 1 + 0.75 · (−tanh(Z / 1.5))          d = T − 1
 ```
 
-ATR% expresses volatility as a fraction of price, making it comparable over time.
+Saturating S-curve: Z = 0 → T = 1; deep discounts approach 1.75, extreme
+overshoots approach 0.25, and a flash-crash Z = −5 cannot produce an absurd
+multiplier.
 
-**vol_factor** scales down aggression when volatility is abnormally high:
-
-```
-atr_baseline = rolling 252-day median of ATR%   (≈ 1 year of "normal" vol)
-vol_factor   = clamp( atr_baseline / atr_pct_today,  min=0.40, max=1.0 )
-```
-
-- Normal vol today → `vol_factor ≈ 1.0` (no dampening)
-- Spike vol today → `vol_factor < 1.0` (aggression damped)
-- Minimum is 0.40 — even in a crash, you still deploy 40% of the intended extra
-
-Rationale: knives fall fastest in high-volatility regimes. Sizing to current volatility is a classic risk-management technique.
-
----
-
-### ADX — Trend strength
+### Step 2 — Asymmetric macro gate
 
 ```
-ADX(14) = directional movement index, averaged over 14 days
+g = clamp( (H − 0.40) / (0.75 − 0.40), 0, 1 )      # the gate ramp
+
+d ≥ 0 (cheap):      d_eff = d · g                  # aggression earned by health
+d < 0 (expensive):  d_eff = d · (1 + 1.0·(1 − g))  # defence amplified when weak
+
+m_core = 1 + d_eff
 ```
 
-ADX measures **how strong** a trend is, not which direction it points.
+H ≥ 0.75 passes aggression through **fully** (v1 multiplied by raw H, which
+silently taxed even perfect regimes); at or below the STRESS boundary (0.40)
+aggression is zero. Defensive tilts are never gated — only amplified.
 
-| ADX | Interpretation |
+### Step 3 — Tactical guards (aggressive portion only)
+
+```
+agg = max(m_core − 1, 0)        def = max(1 − m_core, 0)
+agg_guarded = agg × g_trend × g_vol          # guards never touch `def`
+m_pre = 1 + agg_guarded − def
+```
+
+### Step 4 — Regime cap + global clamp
+
+```
+cap: EXPANSION → 2.00 | CAUTION → 1.25 | STRESS → 1.00
+M = clamp( min(m_pre, cap), 0.25, 2.00 )
+```
+
+In STRESS, M ≤ 1.0 *by construction* — no cheapness can lever you into a
+collapsing market. The 0.25 floor means DCA never fully stops.
+
+### Allocation labels (boundaries in `[fusion.labels]`)
+
+| M range | Label |
 |---|---|
-| < 20 | Weak or no trend — ranging market |
-| 20–25 | Emerging trend |
-| 25–40 | **Strong trend** (threshold used: 25) |
-| > 40 | Very strong trend |
+| < 0.60 | **Defensive** |
+| 0.60 – 0.90 | **Cautious** |
+| 0.90 – 1.10 | **Standard** |
+| 1.10 – 1.40 | **Opportunistic** |
+| > 1.40 | **Aggressive** |
 
-**Current reading: ADX = 37.8** — a strong, established trend.
-
----
-
-### RSI — Momentum
-
-```
-RSI(14) = 100 − (100 / (1 + avg_gains_14 / avg_losses_14))
-```
-
-| RSI | Interpretation |
-|---|---|
-| > 70 | Overbought — momentum extended to the upside |
-| 50–70 | Bullish momentum |
-| 30–50 | Bearish momentum |
-| < 30 | Oversold — momentum extended to the downside |
-
-**Current reading: RSI = 77.2** — overbought. Confirms the Z-score reading.
+The instruction text is generated from M itself ("Invest about 42% of your
+normal amount this period"), so words and numbers can't contradict.
 
 ---
 
-### trend_strong_down (boolean guard)
+## 6. Reading the Dashboard
 
 ```
-trend_strong_down = True   if:
-    price < SMA200          (asset is below its long-term average)
-    AND SMA200_slope < 0    (the average itself is falling)
-    AND ADX > 25            (the downtrend is strong, not noise)
+uv run streamlit run src/iidca/dashboard.py
 ```
 
-This is the most direct "falling knife" detector. If all three conditions are true, the system applies a hard multiplier of 0.30 to any aggressive buying intent.
+- **Header strip** — global regime + H. Banner alerts when any breaker is
+  active or data has failed (fail-safe M = 1.0 is always flagged, never
+  silent).
+- **Watchlist** — every tracked asset: price, 30-day sparkline,
+  trend-residual Z, M, signal label, data source. Click a row to open it.
+  Add/remove tickers in the sidebar; adding fetches, validates, and scores
+  immediately.
+- **Decision hero + waterfall** — M with its plain-language instruction next
+  to a waterfall chart: baseline 1.0 → valuation tilt → macro gate → trend
+  guard → vol guard → cap & floor. Nothing about M is a black box.
+- **Macro section** — H as a stacked contribution bar (weight × sub-score per
+  pillar, regime thresholds marked) and one card per indicator: value, zone
+  band with marker, and a sentence on what it means right now.
+- **Valuation section** — the price chart with the fitted trend channel
+  (±1σ/±2σ) and the current Z marked on it; Z history below.
+- **Risk guards** — volatility vs the asset's own one-year norm, and the
+  trend/falling-knife state, each with the guard value it contributes.
+- **History** — M and H across runs.
+
+Every metric card shows **value + current zone + plain-language reading for
+this asset** — no bare numbers with tooltips.
 
 ---
 
-### TechnicalState output
+## 7. Worked Examples
 
+### A — Healthy dip (best case for buying more)
 ```
-symbol           = "QQQ"
-price            = ~530 (example)
-sma200           = ~480 (example)
-sma_slope        = positive
-z                = 3.114     ← 3+ std devs above mean = expensive
-atr_pct          = 0.0140    ← 1.4% daily range = normal vol
-vol_factor       = 1.0       ← vol is normal, no dampening
-adx              = 37.8      ← strong trend
-rsi              = 77.2      ← overbought
-trend_strong_down = False    ← price > SMA200, trend is UP not down
+H = 0.90 (EXPANSION, g = 1.0)   Z = −2.0   no guards triggered
+T(−2.0) ≈ 1.65 → d = +0.65 → d_eff = 0.65·1.0 = 0.65
+M = 1.65 → Aggressive ✅  (v1 would have taxed this to ≈1.59 via raw H)
 ```
 
----
-
-## 5. Zone 3 — Fusion: How M is Calculated
-
-**File:** `src/iidca/engines/fusion.py`
-**Output:** `Decision` — the DCA multiplier M and all intermediate values
-
-This is where macro and tactical come together. Four sequential steps.
-
----
-
-### Step 1: Technical tilt T(Z)
-
+### B — The falling knife (the whole point of the system)
 ```
-T(Z) = 1 + 0.75 × (−tanh(Z / 1.5))
+H = 0.15 (STRESS, g = 0)   Z = −2.0 (same cheapness!)
+trend_strong_down = True, vol_factor = 0.50
+d_eff = 0.65 · 0 = 0 → m_pre = 1.0 → STRESS cap 1.00
+M = 1.00 → Standard ✅   Same Z, opposite macro, no extra buying.
 ```
 
-`tanh` (hyperbolic tangent) is an S-curve that saturates at ±1. This means an extreme reading like Z = −5 doesn't produce an absurdly large multiplier — the response saturates.
-
-| Z | T(Z) | Raw interpretation |
-|---|---|---|
-| +3.1 (current) | ≈ 0.38 | Very expensive → want to invest much less |
-| +1.5 | ≈ 0.73 | Somewhat expensive → want slightly less |
-| 0.0 | 1.00 | Fair value → standard DCA |
-| −1.5 | ≈ 1.27 | Somewhat cheap → want slightly more |
-| −3.0 | ≈ 1.62 | Very cheap → want much more |
-
-**d = T − 1** is the deviation from baseline:
-- Positive d = want more than baseline (cheap asset)
-- Negative d = want less than baseline (expensive asset)
-
-For the current reading: `T ≈ 0.38`, so `d ≈ −0.62` — a strong defensive tilt.
-
----
-
-### Step 2: Asymmetric macro gate
-
-This step is the heart of the falling-knife prevention.
-
-**If d ≥ 0 (cheap asset — considering buying more):**
+### C — Expensive in late cycle
 ```
-d_eff = d × H
+H = 0.50 (CAUTION, g = 0.29)   Z = +1.8
+T ≈ 0.37 → d = −0.63 → d_eff = −0.63·(1 + 0.71) = −1.08
+m_pre = −0.08 → floor → M = 0.25 → Defensive
 ```
-The aggressive intent is *multiplied by* the macro health score. A cheap asset in a collapsing macro (H → 0) produces zero extra buying. A cheap asset in a healthy macro (H → 1) passes through fully.
 
-**If d < 0 (expensive asset — wanting to reduce):**
+### D — Strong uptrend, on trend (the case v1 got wrong)
 ```
-d_eff = d × (1 + 1.0 × (1 − H))
-```
-Defensive intent is *amplified* when the macro is weak. An expensive asset in a deteriorating macro triggers more caution, not less.
-
-Then: `M_core = 1 + d_eff`
-
-**For the current case:** d = −0.62 (defensive), H = 0.766
-```
-d_eff = −0.62 × (1 + 1.0 × (1 − 0.766))
-       = −0.62 × 1.234
-       = −0.765
-M_core = 1 − 0.765 = 0.235
+H = 0.74 (EXPANSION)   asset rising ~25%/yr, price ON its trend → Z ≈ 0
+T = 1.0 → d = 0 → M = 1.00 → Standard ✅
+v1's mean-based Z read ≈ +1.7 here and cut the buy to ~0.45 permanently.
 ```
 
 ---
 
-### Step 3: Tactical guards (on aggressive portion only)
+## 8. Configuration Reference
 
-Guards only apply to any *extra buying* — they never amplify the defensive signal.
+**File:** `config/default.toml` — every threshold is a parameter; snapshots
+store a `config_hash` so any past recommendation is attributable to an exact
+parameter set. Env vars override anything: `IIDCA_MACRO__STRESS_CRISIS=2.0`,
+`IIDCA_WATCHLIST='["SPY","BTC-USD"]'`.
 
-```
-agg  = max(M_core − 1, 0)    ← the aggressive portion above baseline
-def_ = max(1 − M_core, 0)    ← the defensive portion below baseline
-
-g_trend = 0.30  if trend_strong_down else 1.0
-g_vol   = vol_factor   (0.40 to 1.0)
-
-agg_guarded = agg × g_trend × g_vol
-M_pre = 1 + agg_guarded − def_
-```
-
-Here M_core = 0.235, so `agg = 0` (no aggressive portion), `def_ = 0.765`.
-Guards have nothing to apply to. `M_pre = 1 + 0 − 0.765 = 0.235`.
-
----
-
-### Step 4: Regime cap + global clamp
-
-```
-regime_cap = EXPANSION → 2.00
-             CAUTION   → 1.25
-             STRESS    → 1.00   ← in STRESS you can never lever above baseline
-
-M = clamp( clamp(M_pre, 0.25, regime_cap), 0.25, 2.00 )
-```
-
-The regime caps are a hard safety rail. In STRESS regime, M ≤ 1.0 by construction — no matter how cheap the asset looks, you cannot lever into a structurally collapsing market.
-
-**Current:** M_pre = 0.235, clamped up to global floor of **0.25**.
-
----
-
-### Allocation labels
-
-| M range | Label | Instruction |
-|---|---|---|
-| M < 0.60 | **Defensive** | Reduce this period's DCA (~50%). Expensive and/or deteriorating regime. |
-| 0.60 ≤ M < 0.90 | **Cautious** | Slightly below standard (~75%). |
-| 0.90 ≤ M ≤ 1.10 | **Standard** | Standard DCA (100%). No strong signal. |
-| 1.10 < M ≤ 1.40 | **Opportunistic** | Add modestly (~125%). Cheap and regime-supportive. |
-| M > 1.40 | **Aggressive** | Deploy extra (regime-capped). Deep value in a healthy regime. |
-
----
-
-### Full current calculation summary
-
-| Step | Value | Note |
-|---|---|---|
-| Z | +3.114 | QQQ is 3.1 std devs above 200d mean |
-| T(Z) | 0.38 | Technical tilt — strong defensive |
-| d | −0.62 | Deviation from baseline |
-| H | 0.766 | Macro is healthy |
-| d_eff | −0.765 | Defensive signal amplified slightly (macro < 1) |
-| M_core | 0.235 | Pre-guard multiplier |
-| Guards | n/a | No aggressive portion to guard |
-| M_pre | 0.235 | Pre-clamp |
-| Regime cap | 2.00 | EXPANSION — not binding here |
-| **M** | **0.25** | Clamped up to global floor |
-| **Label** | **Defensive** | Invest ~50% of your normal DCA amount |
-
----
-
-## 6. Zone 1 — Global System Status
-
-A single synthesised string derived from the macro regime + STLFSI4 liquidity reading:
-
-```
-regime_label = Expansion | Late-Cycle Caution | Contraction / Systemic Stress
-
-liquidity    = "Stable Liquidity"    if STLFSI4 < 0
-               "Tightening Liquidity" if 0 ≤ STLFSI4 < 1.5
-               "Stressed Liquidity"  if STLFSI4 ≥ 1.5
-
-status = "{regime_label} & {liquidity}"
-```
-
-If any circuit breaker fired, its name is appended with a ⚠️.
-
-**Current:** `Expansion & Stable Liquidity` — healthy macro, loose financial conditions.
-
----
-
-## 7. Reading the Dashboard
-
-```
-streamlit run src/iidca/dashboard.py
-```
-
-| Element | What to look at |
-|---|---|
-| **Zone 1 colour** | Green = go, Yellow = caution, Red = stress |
-| **H gauge** | How healthy is the macro? Below 0.40 is danger zone |
-| **M multiplier** | Your action: multiply your planned investment by this number |
-| **Z-score** | How cheap/expensive is the asset? Below −1.5 = interesting, above +2 = stretched |
-| **ADX** | Is there a strong trend? Above 25 = yes; combined with price < SMA200 = falling knife risk |
-| **RSI** | Is momentum extended? Above 70 = overbought, below 30 = oversold |
-| **History chart** | Are M and H trending up or down over recent months? |
-
----
-
-## 8. Worked Examples
-
-### Example A — Healthy dip (best case for buying more)
-```
-H = 0.90  (strong expansion)
-Z = −2.0  (asset is 2 std devs below mean — genuinely cheap)
-trend_strong_down = False
-vol_factor = 1.0
-
-T(Z) = 1 + 0.75 × (−tanh(−2.0/1.5)) ≈ 1.59
-d = +0.59   (aggressive)
-d_eff = 0.59 × 0.90 = 0.53   (macro gate passes most of it)
-M_core = 1.53
-Guards: agg = 0.53 × 1.0 × 1.0 = 0.53
-M_pre = 1.53
-Regime cap: 2.00  →  M = 1.53 → Aggressive ✅
-```
-
-### Example B — The falling knife (the whole point of the system)
-```
-H = 0.15  (STRESS regime — economy collapsing)
-Z = −2.0  (asset looks cheap, same as above)
-trend_strong_down = True  →  g_trend = 0.30
-vol_factor = 0.50         →  g_vol = 0.50
-
-T(Z) ≈ 1.59 (same)
-d = +0.59   (aggressive)
-d_eff = 0.59 × 0.15 = 0.089   ← macro gate kills most of the aggression
-M_core = 1.089
-agg = 0.089 × 0.30 × 0.50 = 0.013   ← guards kill what's left
-M_pre = 1.013
-Regime cap: STRESS → 1.00  →  M = 1.00 → Standard ✅
-```
-
-Same Z-score, completely different outcome. Cheap in a collapsing macro = Standard DCA, not Aggressive.
-
-### Example C — Expensive in late cycle
-```
-H = 0.45  (CAUTION)
-Z = +1.8  (expensive)
-d = −0.55  (defensive)
-d_eff = −0.55 × (1 + 1.0 × 0.55) = −0.85
-M_core = 0.15  →  clamped to M_min = 0.25 → Defensive
-```
-
-### Example D — No signal
-```
-H = 0.70, Z = 0.0  →  T = 1.0, d = 0, M = 1.00 → Standard
-```
-
----
-
-## 9. Configuration Reference
-
-**File:** `config/default.toml`
-
-All thresholds are parameters, not hard-coded truths. Edit this file to adjust your personal risk appetite. Every snapshot stores a `config_hash` so you can always trace which parameter set produced a given recommendation.
+Key parameters (see the file for the full annotated list):
 
 ```toml
-target_symbol = "QQQ"        # what asset to analyse
-market_provider = "yfinance" # yfinance | stooq | tiingo | tradingview
+watchlist      = ["QQQ"]                 # seed; manage in the dashboard after
+provider_chain = ["yfinance", "stooq"]   # ordered fallback
+lookback_days  = 1200
 
-[macro]
-sahm_trigger      = 0.50   # Sahm ≥ this → SAHM_RECESSION breaker
-stress_crisis     = 1.50   # STLFSI4 ≥ this → FIN_STRESS_CRISIS breaker
-w_sahm            = 0.40   # weight in H blend
-w_curve           = 0.25
-w_stress          = 0.35
-regime_expansion  = 0.66   # H ≥ this → EXPANSION
-regime_caution    = 0.40   # H ≥ this → CAUTION (else STRESS)
-
-[tactical]
-z_window          = 200    # days for Z-score rolling window
-sma_window        = 200    # days for SMA
-adx_trend_thresh  = 25.0   # ADX above this = strong trend
-g_vol_min         = 0.40   # floor on vol dampening factor
-staleness_days    = 5      # max age of last price bar before data_ok=False
-
-[fusion]
-alpha        = 0.75   # max tilt amplitude (M range: [0.25, 1.75] pre-gate)
-beta         = 1.5    # tanh saturation (higher = more linear response to Z)
-lam          = 1.0    # defensive amplifier strength when macro weak
-g_trend_down = 0.30   # multiplier on aggression when falling-knife detected
-m_cap_exp    = 2.00   # max M in EXPANSION
-m_cap_caution= 1.25   # max M in CAUTION
-m_cap_stress = 1.00   # max M in STRESS (never lever into collapsing tape)
-m_min        = 0.25   # global floor — never fully stop DCA
-m_max        = 2.00   # global ceiling
+[macro]      # ramps, weights, regime thresholds, breaker triggers,
+             # NFCI fallback ramp, dis-inversion watch parameters
+[tactical]   # z_window, SMA/ADX/ATR windows, vol-guard floor, staleness
+[fusion]     # alpha/beta tilt, gate_floor_h/gate_full_h ramp, lam,
+             # g_trend_down, regime caps, m_min/m_max
+[fusion.labels]  # allocation tier boundaries
 ```
 
 ---
 
-## 10. Running the Project
+## 9. Running the Project
 
 ### Prerequisites
 
 ```bash
-# Free FRED API key — get at fred.stlouisfed.org/docs/api/api_key.html
-export FRED_API_KEY=your_32_char_key
-
-# Optional — for Telegram alerts
-export TELEGRAM_BOT_TOKEN=your_bot_token
-export TELEGRAM_CHAT_ID=your_chat_id
+export FRED_API_KEY=your_32_char_key     # free: fred.stlouisfed.org
+export TELEGRAM_BOT_TOKEN=...            # optional, for alerts
+export TELEGRAM_CHAT_ID=...
 ```
 
-### Install
+### Install & run
 
 ```bash
 uv sync
-```
-
-### Run a cycle (headless)
-
-```bash
-uv run python -m iidca.run             # print signal to terminal
-uv run python -m iidca.run --alert     # also push Telegram/email
-uv run python -m iidca.run --symbol SPY --verbose
-```
-
-### Dashboard
-
-```bash
+uv run python -m iidca.run               # one cycle, all watchlist assets
+uv run python -m iidca.run --symbol SPY  # single symbol
+uv run python -m iidca.run --alert       # also push Telegram/email
 uv run streamlit run src/iidca/dashboard.py
 ```
 
 ### Tests
 
 ```bash
-uv run pytest -m "not network"   # fast, no internet required
-uv run pytest                    # all tests including live data checks
+uv run pytest -m "not network"           # fast, no internet (50 tests)
+uv run pytest                            # all tests
 ```
 
 ### Automation (GitHub Actions)
 
-Push to GitHub, add `FRED_API_KEY` / `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` as repository secrets. The workflow in `.github/workflows/monthly.yml` runs automatically on the 1st of each month at 08:00 UTC and uploads the DuckDB snapshot as an artifact.
+Add `FRED_API_KEY` / `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` as repository
+secrets; `.github/workflows/monthly.yml` runs on the 1st of each month and
+uploads the DuckDB snapshot as an artifact.
 
 ---
 
 ## Architecture at a glance
 
 ```
-FRED API                    yfinance / stooq / tiingo
-    │                               │
-    ▼                               ▼
-fred.py (cached Parquet)    yfinance_provider.py etc.
-    │                               │
-    ▼                               ▼
-macro.py ──── MacroState    tactical.py ── TechnicalState
-         H, regime,                  Z, ATR%, ADX,
-         sub-scores,                 RSI, vol_factor,
-         circuit breakers            trend_strong_down
-              │                           │
-              └──────────┬────────────────┘
-                         ▼
-                    fusion.py
-               4-step calculation → M
-                         │
-              ┌──────────┼──────────┐
-              ▼          ▼          ▼
-         storage.py  dashboard.py  alerts.py
-         DuckDB      Streamlit     Telegram/SMTP
-         snapshot    3-zone UI     monthly push
+FRED API (cached, dual-client)        provider chain (yfinance → stooq → cache)
+        │                                          │  per asset
+        ▼                                          ▼
+macro.py ── MacroState (global)       tactical.py ── TechnicalState
+   H, regime, sub-scores,                trend-residual Z, ATR%/vol_factor,
+   hard + soft breakers                  ADX, falling-knife guard
+        │                                          │
+        └──────────────┬───────────────────────────┘
+                       ▼
+                   fusion.py  — tilt → gate → guards → caps → M (+ waterfall)
+                       │
+        ┌──────────────┼──────────────┐
+        ▼              ▼              ▼
+   storage.py     dashboard.py    alerts.py
+   DuckDB:        Streamlit +     Telegram/SMTP
+   macro/asset    Plotly, self-   per-cycle push
+   snapshots,     explaining UI
+   watchlist
 ```
 
-Every arrow is a pure function over typed dataclasses — each stage can be tested in isolation with fixture data, independent of live network calls.
+Every arrow is a pure function over typed dataclasses — each stage is tested
+in isolation with fixture data, independent of live network calls.

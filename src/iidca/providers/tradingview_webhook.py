@@ -10,7 +10,6 @@ Run with:
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -83,7 +82,11 @@ except ImportError:
 # MarketDataProvider backed by the local TradingView store
 # ---------------------------------------------------------------------------
 
-from iidca.providers.base import DataValidationError, MarketDataProvider, validate_ohlcv  # noqa: E402
+from iidca.providers.base import (  # noqa: E402
+    DataValidationError,
+    MarketDataProvider,
+    validate_ohlcv,
+)
 
 
 class TradingViewProvider(MarketDataProvider):

@@ -6,7 +6,12 @@ import logging
 
 import pandas as pd
 
-from iidca.providers.base import DataValidationError, MarketDataProvider, validate_ohlcv
+from iidca.providers.base import (
+    DataValidationError,
+    MarketDataProvider,
+    clean_ohlcv,
+    validate_ohlcv,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +37,7 @@ class YFinanceProvider(MarketDataProvider):
         # Normalise columns
         df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
         df.index = pd.to_datetime(df.index).tz_localize(None)
-        df = df.sort_index()
+        df = clean_ohlcv(df.sort_index())
 
         validate_ohlcv(df, symbol)
         logger.debug("yfinance: fetched %d bars for %s", len(df), symbol)

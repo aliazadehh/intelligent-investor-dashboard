@@ -53,10 +53,14 @@ inject_css()
 # ---------------------------------------------------------------------------
 
 _fred_key_ok = bool(os.environ.get("FRED_API_KEY"))
+_db_url_ok = bool(os.environ.get("DATABASE_URL"))
 try:
     if "FRED_API_KEY" in st.secrets:
         os.environ["FRED_API_KEY"] = str(st.secrets["FRED_API_KEY"])
         _fred_key_ok = True
+    if "DATABASE_URL" in st.secrets:
+        os.environ["DATABASE_URL"] = str(st.secrets["DATABASE_URL"])
+        _db_url_ok = True
 except Exception:
     pass
 
@@ -94,6 +98,12 @@ watchlist = get_watchlist(seed=cfg.watchlist)
 with st.sidebar:
     st.title("⚙️ Controls")
 
+    if not _db_url_ok:
+        st.error(
+            "**DATABASE_URL not configured.** Add your Supabase connection string "
+            "to `.streamlit/secrets.toml` (local) or Space secrets (HF Spaces). "
+            "See `.streamlit/secrets.toml.example` for the format."
+        )
     if not _fred_key_ok:
         st.error(
             "**FRED_API_KEY not configured.** Add it to your environment or "

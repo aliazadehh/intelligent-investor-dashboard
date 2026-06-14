@@ -1,3 +1,14 @@
+---
+title: Intelligent Investor DCA Dashboard
+emoji: 📊
+colorFrom: blue
+colorTo: green
+sdk: streamlit
+sdk_version: 1.46.0
+app_file: src/iidca/dashboard.py
+pinned: false
+---
+
 # Intelligent Investor — Quantitative DCA Dashboard
 
 A personal decision-support tool that tells you **how much to invest this
